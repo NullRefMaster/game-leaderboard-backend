@@ -1,17 +1,17 @@
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::{Method, StatusCode},
     response::IntoResponse,
     routing::get,
-    Json, Router,
+    Router,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::{convert::Infallible, env, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-// Define data structures for requests and responses
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaderboardEntry {
     rank: Option<i64>,
@@ -31,49 +31,18 @@ struct UploadResponse {
     message: String,
 }
 
-// Define handlers for API endpoints
-async fn get_leaderboard(
-    State(pool): State<PgPool>,
-    Path(level): Path<i32>,
-) -> Result<impl IntoResponse, Infallible> {
-    let entries = sqlx::query_as!(
-        LeaderboardEntry,
-        "SELECT ROW_NUMBER() OVER (ORDER BY time) as rank, player, time FROM leaderboard WHERE level = $1",
-        level
-    );
-
-    Ok(axum::Json(entries.fetch_all(&pool).await.unwrap()))
-}
-
-async fn upload_data(
-    State(pool): State<PgPool>,
-    Path(level): Path<i32>,
-    Json(payload): Json<UploadRequest>,
-) -> (StatusCode, String) {
-    // Store uploaded data in the database
-    let result = sqlx::query!(
-        "INSERT INTO leaderboard (level, player, time) VALUES ($1, $2, $3)",
-        level,
-        payload.player,
-        payload.time
-    );
-
-    match result.execute(&pool).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            "Data uploaded successfully".to_string(),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to upload data".to_string(),
-        ),
-    }
+#[derive(Clone)]
+struct AppState {
+    pool: PgPool,
+    key: Arc<Vec<u8>>,
 }
 
 #[tokio::main]
 async fn main() {
-    // Load database URL from environment variable
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set in environment");
+    let key = env::var("KEY").expect("KEY not set in environment");
+    let key = hex::decode(key).expect("Failed to decode key");
+    let key = Arc::new(key);
 
     // Create a database pool
     let pool = PgPoolOptions::new()
@@ -94,9 +63,63 @@ async fn main() {
                 .allow_origin(AllowOrigin::any())
                 .allow_methods([Method::GET, Method::POST]),
         )
-        .with_state(pool);
+        .with_state(AppState { pool, key });
 
     // Start the server
-    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:80").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn get_leaderboard(
+    State(state): State<AppState>,
+    Path(level): Path<i32>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let entries = sqlx::query_as!(
+        LeaderboardEntry,
+        "SELECT ROW_NUMBER() OVER (ORDER BY time) as rank, player, time FROM leaderboard WHERE level = $1",
+        level
+    );
+
+    let data = entries
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::Json(data))
+}
+
+async fn upload_data(
+    State(state): State<AppState>,
+    Path(level): Path<i32>,
+    body: Bytes,
+) -> Result<(), StatusCode> {
+    body.len().checked_sub(16).ok_or(StatusCode::BAD_REQUEST)?;
+    let nonce = body.slice(0..12);
+    let ciphertext = body.slice(12..body.len() - 16);
+    let tag = body.slice(body.len() - 16..);
+    let mut decrypted_body = Vec::with_capacity(ciphertext.len());
+    chacha20_poly1305_aead::decrypt(
+        &state.key,
+        &nonce,
+        &[],
+        &ciphertext,
+        &tag,
+        &mut decrypted_body,
+    )
+    .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let payload = serde_json::from_slice::<UploadRequest>(&decrypted_body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Store uploaded data in the database
+    let result = sqlx::query!(
+        "INSERT INTO leaderboard (level, player, time) VALUES ($1, $2, $3)",
+        level,
+        payload.player,
+        payload.time
+    );
+
+    result
+        .execute(&state.pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(())
 }
