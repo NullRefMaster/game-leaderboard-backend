@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{env, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaderboardEntry {
@@ -62,7 +62,8 @@ async fn main() {
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::any())
-                .allow_methods([Method::GET, Method::POST]),
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers(Any),
         )
         .with_state(AppState { pool, key });
 
