@@ -1,17 +1,20 @@
-from Crypto.Cipher import ChaCha20_Poly1305
+from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
 from os import environ
 import requests
 
 def encrypt_data(key, data):
-    nonce = get_random_bytes(12)
-    cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
-    ciphertext, tag = cipher.encrypt_and_digest(data)
-    return nonce + ciphertext + tag
+    iv = get_random_bytes(16)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    ciphertext = cipher.encrypt(pad(data, AES.block_size))
+    return iv + ciphertext
 
 def decrypt_data(key, data):
-    cipher = ChaCha20_Poly1305.new(key=key, nonce=data[:12])
-    plaintext = cipher.decrypt_and_verify(data[12:-16], data[-16:])
+    iv = data[:16]
+    ciphertext = data[16:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size)
     return plaintext
 
 def main():

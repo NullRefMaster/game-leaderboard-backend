@@ -1,3 +1,4 @@
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -87,25 +88,14 @@ async fn get_leaderboard(
     Ok(axum::Json(data))
 }
 
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
 async fn upload_data(
     State(state): State<AppState>,
     Path(level): Path<i32>,
     body: Bytes,
 ) -> Result<(), StatusCode> {
-    body.len().checked_sub(16).ok_or(StatusCode::BAD_REQUEST)?;
-    let nonce = body.slice(0..12);
-    let ciphertext = body.slice(12..body.len() - 16);
-    let tag = body.slice(body.len() - 16..);
-    let mut decrypted_body = Vec::with_capacity(ciphertext.len());
-    chacha20_poly1305_aead::decrypt(
-        &state.key,
-        &nonce,
-        &[],
-        &ciphertext,
-        &tag,
-        &mut decrypted_body,
-    )
-    .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let decrypted_body = decrypt(&state.key, &body).ok_or(StatusCode::BAD_REQUEST)?;
     let payload = serde_json::from_slice::<UploadRequest>(&decrypted_body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -122,4 +112,12 @@ async fn upload_data(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(())
+}
+
+fn decrypt(key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    data.len().checked_sub(16)?;
+    let iv = &data[..16];
+    let ciphertext = &data[16..];
+    let res = Aes256CbcDec::new(key.into(), iv.into()).decrypt_padded_vec_mut::<Pkcs7>(&ciphertext);
+    res.ok()
 }
