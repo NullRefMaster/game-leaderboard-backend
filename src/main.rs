@@ -78,7 +78,7 @@ async fn get_leaderboard(
 ) -> Result<impl IntoResponse, StatusCode> {
     let entries = sqlx::query_as!(
         LeaderboardEntry,
-        "SELECT ROW_NUMBER() OVER (ORDER BY time) as rank, player, time FROM leaderboard WHERE level = $1",
+        "SELECT ROW_NUMBER() OVER (ORDER BY time) as rank, player, time FROM leaderboard WHERE level = $1 ORDER BY time LIMIT 100",
         level
     );
 
@@ -119,6 +119,6 @@ fn decrypt(key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     data.len().checked_sub(16)?;
     let iv = &data[..16];
     let ciphertext = &data[16..];
-    let res = Aes256CbcDec::new(key.into(), iv.into()).decrypt_padded_vec_mut::<Pkcs7>(&ciphertext);
+    let res = Aes256CbcDec::new(key.into(), iv.into()).decrypt_padded_vec_mut::<Pkcs7>(ciphertext);
     res.ok()
 }
